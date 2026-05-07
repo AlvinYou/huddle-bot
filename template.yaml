@@ -1,0 +1,25 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: Slack Daily Huddle Attendance Bot
+
+Resources:
+  HuddleBotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: huddle-bot
+      Handler: dist/index.handler
+      Runtime: nodejs20.x
+      Timeout: 600
+      MemorySize: 256
+      Environment:
+        Variables:
+          SLACK_BOT_TOKEN: "{{resolve:ssm:/huddle-bot/slack-bot-token}}"
+          SLACK_CHANNEL_ID: "{{resolve:ssm:/huddle-bot/channel-id}}"
+      Events:
+        DailyTrigger:
+          Type: ScheduleV2
+          Properties:
+            # 한국시간 09:15 = UTC 00:15, 평일만
+            ScheduleExpression: "cron(15 0 ? * MON-FRI *)"
+            Name: huddle-bot-daily

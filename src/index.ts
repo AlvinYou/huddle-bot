@@ -1,9 +1,19 @@
 import { WebClient } from "@slack/web-api";
 import "dotenv/config";
+import { fetchLeaves } from "./kakaowork";
+import {
+  buildMessage,
+  exemptLeaveOf,
+  Member,
+  Team,
+  LeaveMap,
+} from "./message";
 
 // ─── 설정 ────────────────────────────────────────────────────────────────────
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN!;
 const CHANNEL_ID = process.env.SLACK_CHANNEL_ID!;
+// 카카오웍스 캘린더 iCal 공개 링크. 설정된 경우에만 연차/부재 연동이 동작한다.
+const KAKAOWORK_ICAL_URL = process.env.KAKAOWORK_ICAL_URL;
 const POLL_INTERVAL_MS = 10_000;   // 10초마다 참여자 갱신
 const POLL_DURATION_MS = 5 * 60 * 1000; // 09:15 ~ 09:20 (5분간 실행)
 
@@ -22,15 +32,10 @@ const USER_GROUP_HANDLES = [
 ];
 
 // ─── 타입 ────────────────────────────────────────────────────────────────────
-interface Member {
-  id: string;
-  name: string;
-}
-
-interface Team {
-  name: string;
+// Member / Team / LeaveMap 은 ./message 에서 가져온다.
+// Team 은 groupId 가 추가로 필요하므로 여기서 확장한다.
+interface TeamWithGroup extends Team {
   groupId: string;
-  members: Member[];
 }
 
 interface HuddleInfo {
@@ -48,7 +53,7 @@ interface HuddleMessage {
 // ─── 팀/멤버 조회 ─────────────────────────────────────────────────────────────
 // Slack User Group에서 팀과 멤버를 동적으로 가져온다.
 // 멤버 변경 시 Slack User Group만 수정하면 자동 반영된다.
-async function fetchTeams(): Promise<Team[]> {
+async function fetchTeams(): Promise<TeamWithGroup[]> {
   const groupsRes = await slack.usergroups.list({ include_users: false });
   const allGroups = groupsRes.usergroups ?? [];
 
@@ -99,28 +104,7 @@ async function findHuddle(): Promise<HuddleInfo | null> {
 }
 
 // ─── 메시지 생성 ──────────────────────────────────────────────────────────────
-function buildMessage(teams: Team[], participants: Set<string>): string {
-  const lines: string[] = ["📋 *오늘 데일리 허들 출석 현황*\n"];
-  let allReady = true;
-
-  for (const team of teams) {
-    const present = team.members.filter((m) => participants.has(m.id));
-    const absent = team.members.filter((m) => !participants.has(m.id));
-    const ratio = `${present.length}/${team.members.length}`;
-    const status = absent.length === 0 ? "✅" : "⏳";
-    if (absent.length > 0) allReady = false;
-
-    const absentStr =
-      absent.length > 0
-        ? `  _(미참여: ${absent.map((m) => m.name).join(", ")})_`
-        : "";
-    lines.push(`${status} *${team.name}* ${ratio}${absentStr}`);
-  }
-
-  if (allReady) lines.push("\n🟢 *전 팀 준비 완료! 시작하세요!*");
-
-  return lines.join("\n");
-}
+// 메시지 생성 로직(buildMessage)은 ./message 로 분리(Slack 비의존 순수 함수).
 
 // ─── 스레드 메시지 생성/업데이트 ─────────────────────────────────────────────
 // 허들 스레드에 봇이 보낸 메시지가 있으면 update, 없으면 새로 post한다.
@@ -154,6 +138,26 @@ export const handler = async () => {
   const teams = await fetchTeams();
   const start = Date.now();
 
+  // 카카오웍스 연차/부재 연동: env가 설정된 경우에만 동작.
+  // fetch/파싱 실패해도 출석 체크는 정상 진행해야 하므로 조용히 건너뛴다.
+  const leaveMap: LeaveMap = new Map();
+  if (KAKAOWORK_ICAL_URL) {
+    try {
+      const leaves = await fetchLeaves(KAKAOWORK_ICAL_URL);
+      for (const leave of leaves) {
+        const list = leaveMap.get(leave.name) ?? [];
+        list.push(leave);
+        leaveMap.set(leave.name, list);
+      }
+      console.log(`카카오웍스 부재 ${leaves.length}건 로드 완료.`);
+    } catch (e) {
+      console.warn("카카오웍스 부재 정보 로드 실패, 연동 없이 진행합니다.", e);
+    }
+  }
+
+  // 오전 부재(면제) 여부 — 조기 종료 판단에도 쓴다.
+  const isExempt = (m: Member): boolean => !!exemptLeaveOf(m, leaveMap);
+
   // 허들이 아직 시작 안 됐을 수 있어서 최대 2분 대기
   let huddle = await findHuddle();
   while (!huddle && Date.now() - start < 2 * 60 * 1000) {
@@ -169,11 +173,12 @@ export const handler = async () => {
   while (Date.now() - start < POLL_DURATION_MS) {
     const latest = await findHuddle();
     const participants = latest?.participants ?? new Set<string>();
-    const message = buildMessage(teams, participants);
+    const message = buildMessage(teams, participants, leaveMap);
     await findOrCreateReply(message, huddle.ts);
 
+    // 오전 부재(면제)자는 안 들어와도 됨 → 조기 종료 판단에서 제외.
     const allPresent = teams.every((team) =>
-      team.members.every((m) => participants.has(m.id))
+      team.members.every((m) => isExempt(m) || participants.has(m.id))
     );
     if (allPresent) break;
 

@@ -16,6 +16,9 @@ Resources:
         Variables:
           SLACK_BOT_TOKEN: "{{resolve:ssm:/huddle-bot/slack-bot-token}}"
           SLACK_CHANNEL_ID: "{{resolve:ssm:/huddle-bot/channel-id}}"
+          # (선택) 카카오웍스 연차/부재 연동. SSM 파라미터가 있어야 한다. DEPLOY.md 참고.
+          # 설정된 경우에만 연차/부재 연동이 동작한다(미설정 시 기존 동작 그대로).
+          KAKAOWORK_ICAL_URL: "{{resolve:ssm:/huddle-bot/kakaowork-ical-url}}"
       Events:
         DailyTrigger:
           Type: ScheduleV2
